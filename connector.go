@@ -1,12 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/http"
+	"net/http/httputil"
 	"os"
+	"strings"
 
 	_ "github.com/lib/pq"
 	_ "github.com/mattn/go-sqlite3"
@@ -14,7 +18,50 @@ import (
 
 var authToken string
 var verificationHost string
+var resetFlag string
+var port string
 var db *sql.DB
+
+// Node struct
+type Node struct {
+	Val string
+}
+
+func main() {
+	log.Println("main():starting up, setting env variables")
+	port = fmt.Sprintf(":%s", os.Args[1])
+	log.Println("main():port=" + port)
+	authToken = os.Args[2]
+	log.Println("main():authToken=" + authToken)
+	verificationHost = os.Args[3]
+	log.Println("main():verificationHost=" + verificationHost)
+	resetFlag = os.Args[4]
+	log.Println("main():resetFlag=" + resetFlag)
+	setupDB()
+	defer db.Close()
+
+	log.Println("main():starting server")
+	http.HandleFunc("/add", addReq)
+	//http.HandleFunc("/reset", resetReq)
+	http.ListenAndServe(port, nil)
+}
+
+func setupDB() {
+	log.Println("setupDB():opening db connection")
+	var err error
+	db, err = sql.Open("sqlite3", "./local.db")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if resetFlag == "y" {
+		log.Println("setupDB():reset db and migrate")
+		q := `DROP TABLE IF EXISTS nodes`
+		db.Exec(q)
+		q = `DROP TABLE IF EXISTS roots`
+		db.Exec(q)
+		addTables()
+	}
+}
 
 func addTables() {
 	sqlStmt := `
@@ -23,39 +70,28 @@ func addTables() {
 	`
 	_, err := db.Exec(sqlStmt)
 	if err != nil {
-		log.Printf("%q: %s\n", err, sqlStmt)
-		return
+		log.Fatalf("%q: %s\n", err, sqlStmt)
 	}
-}
-
-func main() {
-	authToken = os.Args[2]
-	verificationHost = os.Args[3]
-	var err error
-	db, err = sql.Open("sqlite3", "./local.db")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer db.Close()
-	http.HandleFunc("/add", addReq)
-	http.HandleFunc("/reset", resetReq)
-	http.ListenAndServe(fmt.Sprintf(":%s", os.Args[1]), nil)
 }
 
 // PUT /add
 func addReq(w http.ResponseWriter, r *http.Request) {
+	log.Println("addReq():received a request to add hashes")
 	vals := parseRequest(r)
-	var err []string
+	var badHashes []string
+	var nodes []Node
+	log.Println("addReq():inserting parsed values into database")
 	for _, val := range vals {
-		if len(val) != 32 {
-			err = append(err, val)
+		if len(val) != 64 {
+			badHashes = append(badHashes, val)
+		} else {
+			insertNode(val)
+			nodes = append(nodes, Node{Val: val})
 		}
-		insertNode(val)
-		addNode(val)
-		deleteNode(val)
 	}
-	if len(vals) == 0 || len(err) != 0 {
-		http.Error(w, "Invalid hash values", http.StatusBadRequest)
+	addNodes(nodes)
+	if len(vals) == 0 || len(badHashes) != 0 {
+		http.Error(w, "Invalid hash values: "+strings.Join(badHashes, ","), http.StatusBadRequest)
 	} else {
 		js, err := json.Marshal(vals)
 		if err != nil {
@@ -74,7 +110,39 @@ func parseRequest(r *http.Request) []string {
 	if err != nil {
 		log.Fatal(err)
 	}
+	log.Println("parseRequest():parsing request body into json")
 	return vals
+}
+
+func addNodes(nodes []Node) {
+	log.Println("addNodes():making request to verification server")
+	url := verificationHost + "/add/"
+	log.Println("addNodes():making request to URL=" + url)
+	b := new(bytes.Buffer)
+	json.NewEncoder(b).Encode(nodes)
+
+	req, err := http.NewRequest("POST", url, b)
+	log.Print("addNodes():setting request body=")
+	if err != nil {
+		log.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Access-Token", authToken)
+
+	log.Println("addNodes():making request to verification instance")
+	requestDump, err := httputil.DumpRequest(req, true)
+	if err != nil {
+		log.Println(err)
+	}
+	log.Println(string(requestDump))
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := ioutil.ReadAll(resp.Body)
+	log.Print("addNodes():receieved response=" + string(body))
 }
 
 func insertNode(val string) {
@@ -87,15 +155,7 @@ func deleteNode(val string) {
 	db.Exec(q, val)
 }
 
-func addNode(val string) {
-
-}
-
 // POST /reset
 func resetReq(w http.ResponseWriter, r *http.Request) {
-	q := `DROP TABLE IF EXISTS nodes`
-	db.Exec(q)
-	q = `DROP TABLE IF EXISTS roots`
-	db.Exec(q)
-	addTables()
+
 }

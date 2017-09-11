@@ -42,6 +42,7 @@ func main() {
 
 	log.Println("main():starting server")
 	http.HandleFunc("/add", addReq)
+	http.HandleFunc("/remove", removeReq)
 	//http.HandleFunc("/reset", resetReq)
 	http.ListenAndServe(port, nil)
 }
@@ -74,7 +75,7 @@ func addTables() {
 	}
 }
 
-// PUT /add
+// POST /add
 func addReq(w http.ResponseWriter, r *http.Request) {
 	log.Println("addReq():received a request to add hashes")
 	vals := parseRequest(r)
@@ -103,6 +104,35 @@ func addReq(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// POST /remove
+func removeReq(w http.ResponseWriter, r *http.Request) {
+	log.Println("addReq():received a request to add hashes")
+	vals := parseRequest(r)
+	var badHashes []string
+	var nodes []Node
+	log.Println("addReq():inserting parsed values into database")
+	for _, val := range vals {
+		if len(val) != 64 {
+			badHashes = append(badHashes, val)
+		} else {
+			insertNode(val)
+			nodes = append(nodes, Node{Val: val})
+		}
+	}
+	removeNodes(nodes)
+	if len(vals) == 0 || len(badHashes) != 0 {
+		http.Error(w, "Invalid hash values: "+strings.Join(badHashes, ","), http.StatusBadRequest)
+	} else {
+		js, err := json.Marshal(vals)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(js)
+	}
+}
+
 func parseRequest(r *http.Request) []string {
 	var vals []string
 	decoder := json.NewDecoder(r.Body)
@@ -117,6 +147,37 @@ func parseRequest(r *http.Request) []string {
 func addNodes(nodes []Node) {
 	log.Println("addNodes():making request to verification server")
 	url := verificationHost + "/add/"
+	log.Println("addNodes():making request to URL=" + url)
+	b := new(bytes.Buffer)
+	json.NewEncoder(b).Encode(nodes)
+
+	req, err := http.NewRequest("POST", url, b)
+	log.Print("addNodes():setting request body=")
+	if err != nil {
+		log.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Access-Token", authToken)
+
+	log.Println("addNodes():making request to verification instance")
+	requestDump, err := httputil.DumpRequest(req, true)
+	if err != nil {
+		log.Println(err)
+	}
+	log.Println(string(requestDump))
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := ioutil.ReadAll(resp.Body)
+	log.Print("addNodes():receieved response=" + string(body))
+}
+
+func removeNodes(nodes []Node) {
+	log.Println("addNodes():making request to verification server")
+	url := verificationHost + "/remove/"
 	log.Println("addNodes():making request to URL=" + url)
 	b := new(bytes.Buffer)
 	json.NewEncoder(b).Encode(nodes)
